@@ -324,6 +324,7 @@ describe('useLlmStream', () => {
       getArenaAgentClient: vi.fn(() => null),
       isCronEnabled: vi.fn(() => false),
       getCronScheduler: vi.fn(() => null),
+      getHookSystem: vi.fn(() => null),
       getEmitToolUseSummaries: vi.fn(() => false),
       getFastModel: vi.fn(() => undefined),
       getBackgroundTaskRegistry: vi.fn(() => mockBackgroundTaskRegistry),
@@ -13098,6 +13099,52 @@ describe('useLlmStream', () => {
 
       expect(result.current.streamingState).toBe(StreamingState.Idle);
       expect(setShellInputFocusedSpy).toHaveBeenCalledWith(false);
+    });
+
+    it('fires StopFailure with user_cancelled once when the user cancels a responding turn', async () => {
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      (mockConfig.getHookSystem as unknown as Mock).mockReturnValue({
+        fireStopFailureEvent,
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Part 1' };
+          await new Promise(() => {});
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        result.current.submitQuery('test query');
+      });
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(fireStopFailureEvent).toHaveBeenCalledExactlyOnceWith(
+        'user_cancelled',
+      );
+    });
+
+    it('does not fire StopFailure when cancelOngoingRequest runs with nothing responding', () => {
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      (mockConfig.getHookSystem as unknown as Mock).mockReturnValue({
+        fireStopFailureEvent,
+      });
+
+      const { result } = renderTestHook();
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(fireStopFailureEvent).not.toHaveBeenCalled();
     });
 
     it('should not do anything if cancelOngoingRequest is called when not responding', () => {

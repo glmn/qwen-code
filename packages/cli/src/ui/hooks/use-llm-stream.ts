@@ -1430,6 +1430,14 @@ export const useLlmStream = (
       loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
     );
     logApiCancel(config, cancellationEvent);
+    // Fire-and-forget, like the API-error StopFailure: Stop does not fire
+    // for a cancelled turn, so this is the only closing hook it gets.
+    config
+      .getHookSystem()
+      ?.fireStopFailureEvent('user_cancelled')
+      .catch((err) => {
+        debugLogger.warn(`StopFailure hook failed: ${err}`);
+      });
 
     if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());

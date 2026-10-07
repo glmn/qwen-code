@@ -58,7 +58,7 @@ export enum HookEventName {
   PermissionRequest = 'PermissionRequest',
   // When AUTO-mode classification denies a tool call
   PermissionDenied = 'PermissionDenied',
-  // StopFailure - When the turn ends due to an API error (instead of Stop)
+  // StopFailure - When an API error, loop detection or a user cancel ends the turn (instead of Stop)
   StopFailure = 'StopFailure',
   // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
   TodoCreated = 'TodoCreated',
@@ -1223,7 +1223,8 @@ export interface SubagentStopOutput extends HookOutput {
 
 /**
  * StopFailure error types
- * Fires instead of Stop when an API error or loop detection ended the turn
+ * Fires instead of Stop when an API error, loop detection or a user cancel
+ * in the interactive UI ended the turn
  */
 export type StopFailureErrorType =
   | 'rate_limit'
@@ -1233,6 +1234,7 @@ export type StopFailureErrorType =
   | 'server_error'
   | 'max_output_tokens'
   | 'loop_detected'
+  | 'user_cancelled'
   | 'unknown';
 
 /**
