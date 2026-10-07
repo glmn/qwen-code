@@ -445,7 +445,11 @@ export function mcpVersionNegotiationFor(
   };
 }
 
-export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+export function createMcpClient(
+  name: string,
+  cfg: MCPServerConfig,
+  onToolsListChanged?: () => void,
+): Client {
   return new Client(
     { name, version: '0.0.1' },
     {
@@ -454,6 +458,18 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
       // repeated cursors, while its default 64-page cap turns larger valid
       // catalogs into a discovery failure that this module reports as empty.
       listMaxPages: 0,
+      // The SDK delivers `notifications/tools/list_changed` on both protocol
+      // eras (opening the subscription on modern connections); the owner
+      // re-lists through its own discovery path.
+      ...(onToolsListChanged && {
+        listChanged: {
+          tools: {
+            autoRefresh: false,
+            debounceMs: 0,
+            onChanged: onToolsListChanged,
+          },
+        },
+      }),
       capabilities: {
         extensions: {
           [MCP_APPS_EXTENSION_ID]: {
@@ -539,6 +555,9 @@ export class McpClient {
    */
   private lastTransportError?: Error;
   private instructions: string | undefined;
+  private listedResources: readonly DiscoveredMCPResource[] = [];
+  private toolsListChangedHandler?: () => Promise<void>;
+  private toolsListRefresh: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly serverName: string,
@@ -552,7 +571,28 @@ export class McpClient {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
+      () => this.onToolsListChanged(),
     );
+  }
+
+  /**
+   * Sets what runs when the server sends `notifications/tools/list_changed`.
+   * Runs are serialized so an older listing never lands after a newer one.
+   */
+  setToolsListChangedHandler(handler: () => Promise<void>): void {
+    this.toolsListChangedHandler = handler;
+  }
+
+  private onToolsListChanged(): void {
+    const handler = this.toolsListChangedHandler;
+    if (!handler) return;
+    this.toolsListRefresh = this.toolsListRefresh
+      .then(handler)
+      .catch((error) => {
+        debugLogger.warn(
+          `Failed to refresh tools of MCP server '${this.serverName}' after tools/list_changed: ${getErrorMessage(error)}`,
+        );
+      });
   }
 
   /**
@@ -771,6 +811,7 @@ export class McpClient {
         ),
       ]);
       const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
+      this.listedResources = resources;
 
       if (
         prompts.length === 0 &&
@@ -793,6 +834,31 @@ export class McpClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * Re-lists only the server's tools, for `notifications/tools/list_changed`.
+   * Unlike discovery, a failed listing throws instead of returning an empty
+   * set, so callers keep the tools they have.
+   */
+  async discoverTools(
+    cliConfig: Config,
+    opts?: { applyConfigFilters?: boolean },
+  ): Promise<DiscoveredMCPTool[]> {
+    if (this.status !== MCPServerStatus.CONNECTED) {
+      throw new Error('Client is not connected.');
+    }
+    const { tools } = await discoverToolsWithMetadata(
+      this.serverName,
+      this.serverConfig,
+      this.client,
+      cliConfig,
+      {
+        applyConfigFilters: opts?.applyConfigFilters ?? true,
+        throwOnError: true,
+      },
+    );
+    return applyListingAppResourceUi(tools, this.listedResources);
   }
 
   /**
@@ -1602,7 +1668,7 @@ async function discoverToolsWithMetadata(
   mcpServerConfig: MCPServerConfig,
   mcpClient: Client,
   cliConfig: Config,
-  opts?: { applyConfigFilters?: boolean },
+  opts?: { applyConfigFilters?: boolean; throwOnError?: boolean },
 ): Promise<ToolDiscoveryResult> {
   try {
     const { mcpToTool } = await import('@google/genai');
@@ -1739,6 +1805,7 @@ async function discoverToolsWithMetadata(
     }
     return { tools: discoveredTools, hadVisibilityFilteredTools };
   } catch (error) {
+    if (opts?.throwOnError) throw error;
     if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering tools from ${mcpServerName}: ${getErrorMessage(

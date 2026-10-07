@@ -507,6 +507,43 @@ export class PoolEntry {
       }
     };
     addMCPStatusChangeListener(this.statusChangeListener);
+    client.setToolsListChangedHandler(() => this.refreshTools());
+  }
+
+  /**
+   * Re-list tools after the server sent `notifications/tools/list_changed`
+   * and fan the new snapshot out to every subscribed session. Ignored while
+   * spawning or restarting (both re-list anyway) and once terminated.
+   */
+  private async refreshTools(): Promise<void> {
+    const generation = this._generation;
+    const isLive = () =>
+      !this.restartInProgress &&
+      generation === this._generation &&
+      (this.state === 'active' || this.state === 'draining');
+    if (!isLive()) return;
+    const tools = await this.client.discoverTools(this.cliConfig, {
+      applyConfigFilters: false,
+    });
+    if (!isLive()) return;
+    this.toolsSnapshot = tools;
+    for (const [sid, view] of this.subscribers) {
+      try {
+        view.refreshTools(tools);
+      } catch (err) {
+        debugLogger.error(
+          `tools/list_changed fan-out to view ${sid}/${this.serverName} failed: ${String(
+            err,
+          )}`,
+        );
+      }
+    }
+    this.emit({
+      kind: 'toolsChanged',
+      serverName: this.serverName,
+      snapshot: this.toolsSnapshot,
+      generation: this._generation,
+    });
   }
 
   get generation(): number {

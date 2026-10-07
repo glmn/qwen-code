@@ -150,6 +150,7 @@ function mkClient<T extends Rec>(overrides = {} as T) {
     discover: vi.fn(),
     disconnect: vi.fn(),
     getStatus: vi.fn(),
+    setToolsListChangedHandler: vi.fn(),
     ...overrides,
   };
 }
@@ -203,6 +204,7 @@ function makeConnectedMcpClientMock() {
     disconnect: vi.fn().mockResolvedValue(undefined),
     getStatus: vi.fn(() => state.status),
     readResource: vi.fn().mockResolvedValue({ contents: [] }),
+    setToolsListChangedHandler: vi.fn(),
   };
 }
 
@@ -3022,5 +3024,91 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
 
     // Config overlay should have been rolled back
     expect(removeSpy).toHaveBeenCalledWith('fail-srv');
+  });
+});
+
+describe('McpClientManager — tools/list_changed (standalone)', () => {
+  function setup() {
+    const client = stubClient(
+      asyncClient({
+        getStatus: vi.fn().mockReturnValue(MCPServerStatus.CONNECTED),
+        discoverTools: vi.fn(),
+      }),
+    );
+    const toolRegistry = {
+      removeMcpToolsByServer: vi.fn(),
+      registerTool: vi.fn(),
+      refreshMcpToolsByServer: vi.fn((_name: string, fn: () => void) => fn()),
+    };
+    const eventEmitter = { emit: vi.fn() };
+    const config = cfg(stdio('srv'));
+    const manager = mkManager({
+      config,
+      toolRegistry: toolRegistry as unknown as ToolRegistry,
+      options: {
+        eventEmitter:
+          eventEmitter as unknown as McpClientManagerOptions['eventEmitter'],
+      },
+    });
+    return { client, toolRegistry, eventEmitter, config, manager };
+  }
+
+  async function connectAndGetHandler(s: ReturnType<typeof setup>) {
+    await s.manager.discoverMcpToolsForServer('srv', s.config);
+    expect(s.client.setToolsListChangedHandler).toHaveBeenCalledOnce();
+    s.toolRegistry.removeMcpToolsByServer.mockClear();
+    s.eventEmitter.emit.mockClear();
+    return s.client.setToolsListChangedHandler.mock
+      .calls[0][0] as () => Promise<void>;
+  }
+
+  it('replaces the server tools and notifies listeners', async () => {
+    const s = setup();
+    const handler = await connectAndGetHandler(s);
+    const tools = [{ name: 'a' }, { name: 'b' }];
+    s.client.discoverTools.mockResolvedValue(tools);
+
+    await handler();
+
+    expect(s.client.discoverTools).toHaveBeenCalledWith(s.config);
+    expect(s.toolRegistry.refreshMcpToolsByServer).toHaveBeenCalledWith(
+      'srv',
+      expect.any(Function),
+    );
+    expect(s.toolRegistry.removeMcpToolsByServer).toHaveBeenCalledWith('srv');
+    expect(s.toolRegistry.registerTool.mock.calls.map(([t]) => t)).toEqual(
+      tools,
+    );
+    expect(s.eventEmitter.emit).toHaveBeenCalledWith(
+      'mcp-client-update',
+      expect.any(Map),
+    );
+  });
+
+  it('keeps the current tools when the re-list fails', async () => {
+    const s = setup();
+    const handler = await connectAndGetHandler(s);
+    s.client.discoverTools.mockRejectedValue(new Error('tools/list failed'));
+
+    await expect(handler()).rejects.toThrow('tools/list failed');
+
+    expect(s.toolRegistry.removeMcpToolsByServer).not.toHaveBeenCalled();
+    expect(s.eventEmitter.emit).not.toHaveBeenCalled();
+  });
+
+  it('ignores a re-list that finishes after the client was replaced', async () => {
+    const s = setup();
+    const handler = await connectAndGetHandler(s);
+    s.client.discoverTools.mockResolvedValue([{ name: 'late' }]);
+    await s.manager.disconnectServer('srv');
+    s.toolRegistry.removeMcpToolsByServer.mockClear();
+    s.eventEmitter.emit.mockClear();
+
+    await handler();
+
+    expect(s.toolRegistry.registerTool).not.toHaveBeenCalledWith({
+      name: 'late',
+    });
+    expect(s.eventEmitter.emit).not.toHaveBeenCalled();
   });
 });

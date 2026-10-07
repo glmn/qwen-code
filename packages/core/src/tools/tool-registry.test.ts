@@ -1140,6 +1140,26 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
 
+    it('refreshMcpToolsByServer keeps reveal state for tools still listed', () => {
+      const kept = mcp('slack', 'send_message', 'send a message');
+      const dropped = mcp('slack', 'delete_message', 'delete a message');
+      toolRegistry.registerTool(kept);
+      toolRegistry.registerTool(dropped);
+      toolRegistry.revealDeferredTool(kept.name);
+      toolRegistry.revealDeferredTool(dropped.name);
+
+      toolRegistry.refreshMcpToolsByServer('slack', () => {
+        toolRegistry.removeMcpToolsByServer('slack');
+        toolRegistry.registerTool(
+          mcp('slack', 'send_message', 'send a message'),
+        );
+      });
+
+      expect(toolRegistry.isDeferredToolRevealed(kept.name)).toBe(true);
+      expect(toolRegistry.isDeferredToolRevealed(dropped.name)).toBe(false);
+      expect(toolRegistry.getTool(dropped.name)).toBeUndefined();
+    });
+
     it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
       const tool = mcp('slack', 'send_message', 'send a message', {
         type: 'object',

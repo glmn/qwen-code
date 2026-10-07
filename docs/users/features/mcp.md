@@ -283,6 +283,10 @@ starting the session process and can use up to five seconds of the discovery
 budget. Keep the default legacy policy for servers with non-idempotent startup
 side effects, single-owner locks or PID files, or slow initialize handshakes.
 
+### Tools that change while connected
+
+When a connected server sends `notifications/tools/list_changed`, Qwen Code lists that server's tools again and the model sees the new list from its next request, without a restart. If the new listing fails, the previous tools stay. Prompts and resources are read when the server connects or reconnects.
+
 ### Rolling back progressive MCP
 
 If you need the old synchronous behavior (cli waits for every MCP server
@@ -293,7 +297,7 @@ environment. This is kept as an escape hatch for at least one release.
 
 ### Trust (skip confirmations)
 
-- **Server trust** (`trust: true`): bypasses confirmation prompts for that server only in a trusted workspace (use sparingly).
+- **Server trust** (`trust: true`): bypasses confirmation prompts for that server only in a trusted workspace (use sparingly). Trust covers every tool the server lists, including tools it adds later through `notifications/tools/list_changed`; use `includeTools` to pin the set.
 
 ### Connection-loss replay
 

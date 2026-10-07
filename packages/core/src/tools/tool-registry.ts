@@ -727,6 +727,22 @@ export class ToolRegistry {
   }
 
   /**
+   * Runs `reregister` (which replaces `serverName`'s MCP tools) for a
+   * `notifications/tools/list_changed` refresh. Unlike a reconnect the
+   * session continues, so a deferred tool the model already revealed stays
+   * revealed when the server still lists it.
+   */
+  refreshMcpToolsByServer(serverName: string, reregister: () => void): void {
+    const revealed = this.getToolsByServer(serverName)
+      .map((tool) => tool.name)
+      .filter((name) => this.revealedDeferred.has(name));
+    reregister();
+    for (const name of revealed) {
+      if (this.tools.has(name)) this.revealedDeferred.add(name);
+    }
+  }
+
+  /**
    * Disconnects an MCP server by removing its tools, prompts, and disconnecting the client.
    * Unlike disableMcpServer, this does NOT add the server to the exclusion list.
    * @param serverName The name of the server to disconnect.

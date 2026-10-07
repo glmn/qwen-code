@@ -1143,6 +1143,7 @@ export class McpClientManager {
           try {
             await client.connect();
             await client.discover(cliConfig);
+            this.watchToolsListChanged(name, client);
             // Record the fingerprint of the config this client connected with
             // so a later `discoverAllMcpToolsIncremental` can detect an
             // in-place config change. The single-session reconcile guard
@@ -1428,6 +1429,7 @@ export class McpClientManager {
     try {
       await client.connect();
       await client.discover(cliConfig);
+      this.watchToolsListChanged(serverName, client);
       // Record the connected-config key of the config this client is now
       // connected with, so the incremental reconcile can detect a later
       // in-place config change and reconnect (mirrors the pool path's
@@ -1784,6 +1786,25 @@ export class McpClientManager {
     }
     // Same settled-registry report as the per-session bulk pass (#12435).
     warnOnUnmatchedEagerToolEntries(cliConfig);
+  }
+
+  /**
+   * Standalone (non-pooled) clients: on `notifications/tools/list_changed`,
+   * re-list the server's tools and replace them in the session registry.
+   * Pooled clients are refreshed by their `PoolEntry`.
+   */
+  private watchToolsListChanged(serverName: string, client: McpClient): void {
+    client.setToolsListChangedHandler(async () => {
+      const tools = await client.discoverTools(this.cliConfig);
+      if (this.clients.get(serverName) !== client) return;
+      this.toolRegistry.refreshMcpToolsByServer(serverName, () => {
+        this.toolRegistry.removeMcpToolsByServer(serverName);
+        for (const tool of tools) {
+          this.toolRegistry.registerTool(tool);
+        }
+      });
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    });
   }
 
   private releaseAllPooledConnections(): void {
@@ -3145,6 +3166,7 @@ export class McpClientManager {
         this.eventEmitter?.emit('mcp-client-update', this.clients);
         await client.connect();
         await client.discover(this.cliConfig);
+        this.watchToolsListChanged(name, client);
         this.connectedConfigKeys.set(
           name,
           this.singleSessionConnectedKeyOf(name, config),

@@ -237,6 +237,16 @@ export class SessionMcpView {
   }
 
   /**
+   * `applyTools` for a live server's `notifications/tools/list_changed`:
+   * keeps the reveal state of deferred tools that are still listed.
+   */
+  refreshTools(snapshot: readonly DiscoveredMCPTool[]): void {
+    this.sessionToolRegistry.refreshMcpToolsByServer(this.serverName, () =>
+      this.applyTools(snapshot),
+    );
+  }
+
+  /**
    * Replace this session's registered prompts for `serverName` with
    * `snapshot`. Apply the same `excludeTools` / `includeTools`
    * filter the tool path uses. Pre-fix prompts were
