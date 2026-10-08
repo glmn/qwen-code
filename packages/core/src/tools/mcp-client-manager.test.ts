@@ -3058,8 +3058,9 @@ describe('McpClientManager — tools/list_changed (standalone)', () => {
     expect(s.client.setToolsListChangedHandler).toHaveBeenCalledOnce();
     s.toolRegistry.removeMcpToolsByServer.mockClear();
     s.eventEmitter.emit.mockClear();
-    return s.client.setToolsListChangedHandler.mock
-      .calls[0][0] as () => Promise<void>;
+    return s.client.setToolsListChangedHandler.mock.calls[0][0] as (
+      commit: () => boolean,
+    ) => Promise<void>;
   }
 
   it('replaces the server tools and notifies listeners', async () => {
@@ -3068,7 +3069,7 @@ describe('McpClientManager — tools/list_changed (standalone)', () => {
     const tools = [{ name: 'a' }, { name: 'b' }];
     s.client.discoverTools.mockResolvedValue(tools);
 
-    await handler();
+    await handler(() => true);
 
     expect(s.client.discoverTools).toHaveBeenCalledWith(s.config);
     expect(s.toolRegistry.refreshMcpToolsByServer).toHaveBeenCalledWith(
@@ -3085,12 +3086,23 @@ describe('McpClientManager — tools/list_changed (standalone)', () => {
     );
   });
 
-  it('keeps the current tools when the re-list fails', async () => {
+  it('drops a listing the client no longer accepts (newer revision)', async () => {
+    const s = setup();
+    const handler = await connectAndGetHandler(s);
+    s.client.discoverTools.mockResolvedValue([{ name: 'older' }]);
+
+    await handler(() => false);
+
+    expect(s.toolRegistry.removeMcpToolsByServer).not.toHaveBeenCalled();
+    expect(s.eventEmitter.emit).not.toHaveBeenCalled();
+  });
+
+  it('rethrows a failed re-list without touching the registry', async () => {
     const s = setup();
     const handler = await connectAndGetHandler(s);
     s.client.discoverTools.mockRejectedValue(new Error('tools/list failed'));
 
-    await expect(handler()).rejects.toThrow('tools/list failed');
+    await expect(handler(() => true)).rejects.toThrow('tools/list failed');
 
     expect(s.toolRegistry.removeMcpToolsByServer).not.toHaveBeenCalled();
     expect(s.eventEmitter.emit).not.toHaveBeenCalled();
@@ -3104,7 +3116,7 @@ describe('McpClientManager — tools/list_changed (standalone)', () => {
     s.toolRegistry.removeMcpToolsByServer.mockClear();
     s.eventEmitter.emit.mockClear();
 
-    await handler();
+    await handler(() => true);
 
     expect(s.toolRegistry.registerTool).not.toHaveBeenCalledWith({
       name: 'late',

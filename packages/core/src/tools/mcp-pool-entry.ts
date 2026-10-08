@@ -507,25 +507,33 @@ export class PoolEntry {
       }
     };
     addMCPStatusChangeListener(this.statusChangeListener);
-    client.setToolsListChangedHandler(() => this.refreshTools());
+    client.setToolsListChangedHandler((commit) => this.refreshTools(commit));
   }
 
   /**
    * Re-list tools after the server sent `notifications/tools/list_changed`
-   * and fan the new snapshot out to every subscribed session. Ignored while
-   * spawning or restarting (both re-list anyway) and once terminated.
+   * and fan the new snapshot out to every subscribed session. The client
+   * keeps the server's tools gated until `commit()` accepts a listing; one
+   * taken while the entry was spawning or restarting is not trusted (throwing
+   * schedules the client's retry). Ignored once terminated.
    */
-  private async refreshTools(): Promise<void> {
+  private async refreshTools(commit: () => boolean): Promise<void> {
+    const isTerminated = () =>
+      this.state === 'closed' || this.state === 'failed';
+    if (isTerminated()) return;
     const generation = this._generation;
-    const isLive = () =>
-      !this.restartInProgress &&
-      generation === this._generation &&
-      (this.state === 'active' || this.state === 'draining');
-    if (!isLive()) return;
     const tools = await this.client.discoverTools(this.cliConfig, {
       applyConfigFilters: false,
     });
-    if (!isLive()) return;
+    if (isTerminated()) return;
+    if (
+      this.restartInProgress ||
+      this.state === 'spawning' ||
+      generation !== this._generation
+    ) {
+      throw new Error('the connection restarted during the refresh');
+    }
+    if (!commit()) return;
     this.toolsSnapshot = tools;
     for (const [sid, view] of this.subscribers) {
       try {

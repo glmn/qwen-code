@@ -34,7 +34,8 @@ import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
-import type { McpToolAnnotations } from './mcp-tool.js';
+import type { McpDirectClient, McpToolAnnotations } from './mcp-tool.js';
+import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 import {
   MCPServerStatus,
@@ -534,6 +535,18 @@ export enum MCPDiscoveryState {
  * This class is responsible for connecting to, discovering tools from, and
  * managing the state of a single MCP server.
  */
+/** Delay before the single retry of a failed tools/list_changed refresh. */
+export const TOOLS_REFRESH_RETRY_MS = 1_000;
+
+/**
+ * Runs on `notifications/tools/list_changed`: re-lists the server's tools
+ * and, once `commit()` returns true, applies them. `commit()` returns false
+ * when a newer notification arrived meanwhile (that listing is dropped) and
+ * otherwise lifts the stale gate. Throwing keeps the tools gated and
+ * schedules one retry.
+ */
+export type ToolsListChangedHandler = (commit: () => boolean) => Promise<void>;
+
 export class McpClient {
   private client: Client;
   private transport: Transport | undefined;
@@ -556,8 +569,40 @@ export class McpClient {
   private lastTransportError?: Error;
   private instructions: string | undefined;
   private listedResources: readonly DiscoveredMCPResource[] = [];
-  private toolsListChangedHandler?: () => Promise<void>;
-  private toolsListRefresh: Promise<void> = Promise.resolve();
+  private toolsListChangedHandler?: ToolsListChangedHandler;
+  /** Bumped on every `notifications/tools/list_changed`. */
+  private toolsRevision = 0;
+  /**
+   * True from a `tools/list_changed` until a listing for the latest revision
+   * is applied. Calls to this server's tools are refused meanwhile: the server
+   * said its catalog changed, so the old listing no longer proves a tool is
+   * still offered.
+   */
+  private toolsStale = false;
+  private toolsRefreshRetry?: ReturnType<typeof setTimeout>;
+  /**
+   * What discovered tools call through: the SDK client, gated while the
+   * tool list is stale.
+   */
+  private readonly toolCallClient: McpDirectClient = {
+    callTool: (params, options) => {
+      if (this.toolsStale) {
+        return Promise.reject(
+          new StructuredToolError(
+            `MCP server '${this.serverName}' reported that its tool list changed and the refreshed list has not arrived yet, so '${params.name}' was not called. Retry shortly; the tool runs again once the server lists it.`,
+            ToolErrorType.EXECUTION_FAILED,
+          ),
+        );
+      }
+      return this.client.callTool(params, options) as ReturnType<
+        McpDirectClient['callTool']
+      >;
+    },
+    readResource: (params, options) =>
+      this.client.readResource(params, options) as ReturnType<
+        NonNullable<McpDirectClient['readResource']>
+      >,
+  };
 
   constructor(
     private readonly serverName: string,
@@ -577,22 +622,57 @@ export class McpClient {
 
   /**
    * Sets what runs when the server sends `notifications/tools/list_changed`.
-   * Runs are serialized so an older listing never lands after a newer one.
+   * See {@link ToolsListChangedHandler}.
    */
-  setToolsListChangedHandler(handler: () => Promise<void>): void {
+  setToolsListChangedHandler(handler: ToolsListChangedHandler): void {
     this.toolsListChangedHandler = handler;
   }
 
+  /** Whether this server's tools are refused pending a tools/list refresh. */
+  areToolsStale(): boolean {
+    return this.toolsStale;
+  }
+
   private onToolsListChanged(): void {
+    if (!this.toolsListChangedHandler) return;
+    const revision = ++this.toolsRevision;
+    this.toolsStale = true;
+    this.clearToolsRefreshRetry();
+    void this.refreshToolsList(revision, true);
+  }
+
+  private async refreshToolsList(
+    revision: number,
+    retryOnFailure: boolean,
+  ): Promise<void> {
     const handler = this.toolsListChangedHandler;
-    if (!handler) return;
-    this.toolsListRefresh = this.toolsListRefresh
-      .then(handler)
-      .catch((error) => {
-        debugLogger.warn(
-          `Failed to refresh tools of MCP server '${this.serverName}' after tools/list_changed: ${getErrorMessage(error)}`,
-        );
+    if (!handler || revision !== this.toolsRevision) return;
+    try {
+      await handler(() => {
+        // Only the listing for the latest notification may land: an older
+        // response must not restore a tool a newer revision removed.
+        if (revision !== this.toolsRevision) return false;
+        this.toolsStale = false;
+        return true;
       });
+    } catch (error) {
+      if (revision !== this.toolsRevision || this.isDisconnecting) return;
+      debugLogger.warn(
+        `Failed to refresh tools of MCP server '${this.serverName}' after tools/list_changed; its tools stay unavailable until a refresh succeeds${retryOnFailure ? ` (retrying in ${TOOLS_REFRESH_RETRY_MS}ms)` : ''}: ${getErrorMessage(error)}`,
+      );
+      if (!retryOnFailure) return;
+      const timer = setTimeout(() => {
+        this.toolsRefreshRetry = undefined;
+        void this.refreshToolsList(revision, false);
+      }, TOOLS_REFRESH_RETRY_MS);
+      timer.unref?.();
+      this.toolsRefreshRetry = timer;
+    }
+  }
+
+  private clearToolsRefreshRetry(): void {
+    if (this.toolsRefreshRetry) clearTimeout(this.toolsRefreshRetry);
+    this.toolsRefreshRetry = undefined;
   }
 
   /**
@@ -792,6 +872,7 @@ export class McpClient {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
+    const toolsRevision = this.toolsRevision;
 
     try {
       // Prompts, resources, and tools are independent reads with no data
@@ -807,7 +888,10 @@ export class McpClient {
           this.serverConfig,
           this.client,
           cliConfig,
-          { applyConfigFilters: opts?.applyConfigFilters ?? true },
+          {
+            applyConfigFilters: opts?.applyConfigFilters ?? true,
+            callClient: this.toolCallClient,
+          },
         ),
       ]);
       const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
@@ -822,6 +906,12 @@ export class McpClient {
         throw new Error('No prompts, tools, or resources found on the server.');
       }
 
+      // A full discovery (connect, reconnect, pool restart) is a fresh
+      // listing, unless a tools/list_changed arrived while it ran.
+      if (toolsRevision === this.toolsRevision) {
+        this.toolsStale = false;
+        this.clearToolsRefreshRetry();
+      }
       return { tools, prompts, resources };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
@@ -856,6 +946,7 @@ export class McpClient {
       {
         applyConfigFilters: opts?.applyConfigFilters ?? true,
         throwOnError: true,
+        callClient: this.toolCallClient,
       },
     );
     return applyListingAppResourceUi(tools, this.listedResources);
@@ -881,6 +972,7 @@ export class McpClient {
     this.status = MCPServerStatus.DISCONNECTED;
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
+    this.clearToolsRefreshRetry();
     if (this.transport) {
       // Streamable HTTP only: the SDK's `transport.close()` aborts local
       // state but leaves the server-side session alive. Per spec, a client
@@ -1668,7 +1760,12 @@ async function discoverToolsWithMetadata(
   mcpServerConfig: MCPServerConfig,
   mcpClient: Client,
   cliConfig: Config,
-  opts?: { applyConfigFilters?: boolean; throwOnError?: boolean },
+  opts?: {
+    applyConfigFilters?: boolean;
+    throwOnError?: boolean;
+    /** What the tools call through; defaults to `mcpClient`. */
+    callClient?: McpDirectClient;
+  },
 ): Promise<ToolDiscoveryResult> {
   try {
     const { mcpToTool } = await import('@google/genai');
@@ -1778,7 +1875,9 @@ async function discoverToolsWithMetadata(
             applyConfigFilters ? mcpServerConfig.trust : undefined,
             undefined,
             cliConfig,
-            mcpClient, // raw MCP Client for direct callTool with progress
+            // raw MCP Client (or McpClient's stale gate around it) for
+            // direct callTool with progress
+            opts?.callClient ?? mcpClient,
             mcpTimeout,
             cliConfig?.getMcpToolIdleTimeoutMs?.(),
             annotationsMap.get(funcDecl.name!),

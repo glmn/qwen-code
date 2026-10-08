@@ -1794,9 +1794,10 @@ export class McpClientManager {
    * Pooled clients are refreshed by their `PoolEntry`.
    */
   private watchToolsListChanged(serverName: string, client: McpClient): void {
-    client.setToolsListChangedHandler(async () => {
+    client.setToolsListChangedHandler(async (commit) => {
       const tools = await client.discoverTools(this.cliConfig);
       if (this.clients.get(serverName) !== client) return;
+      if (!commit()) return;
       this.toolRegistry.refreshMcpToolsByServer(serverName, () => {
         this.toolRegistry.removeMcpToolsByServer(serverName);
         for (const tool of tools) {

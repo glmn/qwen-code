@@ -285,7 +285,7 @@ side effects, single-owner locks or PID files, or slow initialize handshakes.
 
 ### Tools that change while connected
 
-When a connected server sends `notifications/tools/list_changed`, Qwen Code lists that server's tools again and the model sees the new list from its next request, without a restart. If the new listing fails, the previous tools stay. Prompts and resources are read when the server connects or reconnects.
+When a connected server sends `notifications/tools/list_changed`, Qwen Code lists that server's tools again and the model sees the new list from its next request, without a restart. Until that listing arrives, calls to the server's tools are refused with a retryable error, because the server may have withdrawn a tool; if the listing fails, Qwen Code retries once and the tools stay refused until a listing succeeds (or the server reconnects). When notifications overlap, only the listing for the latest one is applied. Prompts and resources are read when the server connects or reconnects.
 
 ### Rolling back progressive MCP
 
