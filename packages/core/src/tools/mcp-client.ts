@@ -579,6 +579,13 @@ export class McpClient {
    * still offered.
    */
   private toolsStale = false;
+  /**
+   * A `tools/list_changed` arrived before a handler was installed (the
+   * standalone paths install it only after initial discovery). Replayed by
+   * {@link setToolsListChangedHandler} unless a later full discovery already
+   * covered it, so a change during startup is never lost.
+   */
+  private toolsChangedBeforeHandler = false;
   private toolsRefreshRetry?: ReturnType<typeof setTimeout>;
   /**
    * What discovered tools call through: the SDK client, gated while the
@@ -626,6 +633,10 @@ export class McpClient {
    */
   setToolsListChangedHandler(handler: ToolsListChangedHandler): void {
     this.toolsListChangedHandler = handler;
+    if (this.toolsChangedBeforeHandler) {
+      this.toolsChangedBeforeHandler = false;
+      this.markToolsStaleAndRefresh(this.toolsRevision);
+    }
   }
 
   /** Whether this server's tools are refused pending a tools/list refresh. */
@@ -634,8 +645,17 @@ export class McpClient {
   }
 
   private onToolsListChanged(): void {
-    if (!this.toolsListChangedHandler) return;
     const revision = ++this.toolsRevision;
+    if (!this.toolsListChangedHandler) {
+      // Remember it: a discovery still in flight sees the revision move and
+      // won't treat its snapshot as current, and the handler replays it.
+      this.toolsChangedBeforeHandler = true;
+      return;
+    }
+    this.markToolsStaleAndRefresh(revision);
+  }
+
+  private markToolsStaleAndRefresh(revision: number): void {
     this.toolsStale = true;
     this.clearToolsRefreshRetry();
     void this.refreshToolsList(revision, true);
@@ -910,6 +930,7 @@ export class McpClient {
       // listing, unless a tools/list_changed arrived while it ran.
       if (toolsRevision === this.toolsRevision) {
         this.toolsStale = false;
+        this.toolsChangedBeforeHandler = false;
         this.clearToolsRefreshRetry();
       }
       return { tools, prompts, resources };

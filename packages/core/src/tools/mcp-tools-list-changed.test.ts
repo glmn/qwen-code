@@ -36,10 +36,14 @@ import type { ToolRegistry } from './tool-registry.js';
 //                in order: { tools?, delayMs? }
 // tools/call answers `called <name>` for a listed tool and an error for any
 // other. Every tools/list request is appended to the log file.
+// With a third argument \`startup\`, the server drops \`gone\` right after
+// answering the first tools/list and sends list_changed, while prompts/list is
+// still held back, so the change lands inside the client's initial discovery.
 const SERVER = `
   import { appendFileSync, readFileSync } from 'node:fs';
   import readline from 'node:readline';
-  const [control, log] = process.argv.slice(1);
+  const [control, log, mode] = process.argv.slice(1);
+  let startup = mode === 'startup';
   const tool = (name) => ({
     name,
     description: name,
@@ -94,6 +98,13 @@ const SERVER = `
       const result = { tools: (override.tools ?? tools).map(tool) };
       if (override.delayMs) setTimeout(() => reply({ result }), override.delayMs);
       else reply({ result });
+      if (startup) {
+        startup = false;
+        tools = ['first'];
+        send({ method: 'notifications/tools/list_changed' });
+      }
+    } else if (request.method === 'prompts/list' && mode === 'startup') {
+      setTimeout(() => reply({ result: { prompts: [] } }), 400);
     } else if (request.method === 'tools/call') {
       const name = request.params.name;
       if (tools.includes(name)) {
@@ -194,10 +205,17 @@ describe.each(['standalone', 'pooled'] as const)(
     const everywhere = (names: string[]) =>
       allNames().every((n) => JSON.stringify(n) === JSON.stringify(names));
 
-    async function start(): Promise<Harness> {
+    async function start(startupChange = false): Promise<Harness> {
       const serverConfig = {
         command: process.execPath,
-        args: ['--input-type=module', '--eval', SERVER, control, log],
+        args: [
+          '--input-type=module',
+          '--eval',
+          SERVER,
+          control,
+          log,
+          ...(startupChange ? ['startup'] : []),
+        ],
       } as MCPServerConfig;
       if (mode === 'standalone') {
         const session = mkToolRegistry();
@@ -334,6 +352,22 @@ describe.each(['standalone', 'pooled'] as const)(
       await sleep(1_000); // the late response has arrived and been dropped
       expect(everywhere(['first'])).toBe(true);
       for (const session of harness.sessions) {
+        expect(await session.call('first')).toContain('called first');
+      }
+    }, 20_000);
+
+    it('startup: a change sent during initial discovery is not lost', async () => {
+      await harness.stop();
+      // The server drops `gone` and sends list_changed after the first
+      // tools/list but before discovery finishes. The final registry must
+      // follow the newer listing, not the snapshot discovery started with.
+      harness = await start(true);
+
+      await until(() => everywhere(['first']));
+      await sleep(500);
+      expect(everywhere(['first'])).toBe(true);
+      for (const session of harness.sessions) {
+        await expect(session.call('gone')).rejects.toThrow(/is not registered/);
         expect(await session.call('first')).toContain('called first');
       }
     }, 20_000);
